@@ -1,5 +1,6 @@
 pragma solidity ^0.8.7;
 pragma experimental ABIEncoderV2;
+
 import "../interfaces/IPoolManager.sol";
 import "./StableMaster.sol";
 import "./StableMasterStorage.sol";
@@ -14,6 +15,7 @@ contract StableMasterQuery is FunctionUtils {
         if (newStocksUsers > totalHedgeAmount) ratio = uint64((totalHedgeAmount * BASE_PARAMS) / newStocksUsers);
         else ratio = uint64(BASE_PARAMS);
     }
+
     function _computeFeeMint(uint256 amount, StableMaster.Collateral memory col) internal view returns (uint256 feeMint) {
         uint64 feeMint64;
         if (col.feeData.xFeeMint.length == 1) {
@@ -61,6 +63,39 @@ contract StableMasterQuery is FunctionUtils {
         return amountForUserInStable;
     }
 
+    function _computeFeeBurn(uint256 amount, StableMaster.Collateral memory col) internal view returns (uint256 feeBurn) {
+        uint64 feeBurn64;
+        if (col.feeData.xFeeBurn.length == 1) {
+            // Avoiding an external call if fees are constant
+            feeBurn64 = col.feeData.yFeeBurn[0];
+        } else {
+            uint64 hedgeRatio = _computeHedgeRatio(col.stocksUsers - amount, col);
+            // Computing the fees based on the spread
+            feeBurn64 = _piecewiseLinear(hedgeRatio, col.feeData.xFeeBurn, col.feeData.yFeeBurn);
+        }
+        // Fees could in some occasions depend on other factors like collateral ratio
+        // Keepers are the ones updating this part of the fees
+        feeBurn = (feeBurn64 * col.feeData.bonusMalusBurn) / BASE_PARAMS;
+    }
+
+    function burnQuery(uint256 amount,
+        address poolManager) external view returns (uint256) {
+        StableMaster.Collateral memory col = getCollateral(IPoolManager(poolManager));
+        if (address(col.token) == address(0)) {
+            return 0;
+        }
+        bytes32 target = keccak256(abi.encodePacked(agent, address(poolManager)));
+        if (stableMaster.paused(target)) {
+            return 0;
+        }
+        if (amount > col.stocksUsers) {
+            return 0;
+        }
+        uint256 oracleValue = col.oracle.readUpper();
+        uint256 amountInC = (amount * col.collatBase) / oracleValue;
+        uint256 redeemInC = (amount * (BASE_PARAMS - _computeFeeBurn(amount, col)) * col.collatBase) / (oracleValue * BASE_PARAMS);
+        return redeemInC;
+    }
 
 
     StableMaster constant internal stableMaster = StableMaster(0x5adDc89785D75C86aB939E9e15bfBBb7Fc086A87);
